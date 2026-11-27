@@ -21,6 +21,7 @@ import {
   simulateCodeRun
 } from "./demo";
 import { getLanguageMeta, inferLanguageFromPath } from "./lib";
+import { parseAiDiffResponse } from "./lib/diffParser";
 import type { AiAction, ChatMessage, CodeApplyAction, ConsoleTab, EditorCursorContext, FlatFile, LanguageOption, Project, StyleProfile, User } from "./types";
 
 const initialLogs = [
@@ -75,6 +76,13 @@ export default function App() {
   const [resizingAiPanel, setResizingAiPanel] = useState(false);
   const [styleProfile, setStyleProfile] = useState<StyleProfile | null>(null);
   const [isIndexingStyle, setIsIndexingStyle] = useState(false);
+  const [diffPreview, setDiffPreview] = useState<{
+    filePath: string;
+    originalContent: string;
+    proposedContent: string;
+    stats: { added: number; removed: number };
+    hunkCount: number;
+  } | null>(null);
 
   const activeLanguageLabel = useMemo(() => getLanguageMeta(language).label, [language]);
 
@@ -654,6 +662,64 @@ export default function App() {
       pushOutputLogs([`[Style DNA] Error: ${msg}`]);
     }
   }, [token, activeProject?.id, pushOutputLogs]);
+
+  const handlePreviewDiff = useCallback(
+    (aiReply: string) => {
+      if (!activeFile) {
+        pushOutputLogs(["[AI Diff] Please open a file first to preview diffs."]);
+        return;
+      }
+      const parsed = parseAiDiffResponse(editorValue, aiReply);
+      if (!parsed.hasDiff) {
+        pushOutputLogs(["[AI Diff] No Search/Replace diff hunks detected in this message."]);
+        return;
+      }
+      if (parsed.error) {
+        pushOutputLogs([`[AI Diff Warning] ${parsed.error}`]);
+      }
+      setDiffPreview({
+        filePath: activeFile,
+        originalContent: editorValue,
+        proposedContent: parsed.proposedContent,
+        stats: parsed.stats,
+        hunkCount: parsed.hunks.length
+      });
+      pushOutputLogs([
+        `[AI Diff] Previewing ${parsed.hunks.length} hunk(s) (+${parsed.stats.added}, -${parsed.stats.removed} lines) on ${activeFile}`
+      ]);
+    },
+    [activeFile, editorValue, pushOutputLogs]
+  );
+
+  const handleAcceptDiff = useCallback(async () => {
+    if (!diffPreview || !activeProject) return;
+    const { filePath, proposedContent } = diffPreview;
+    setEditorValue(proposedContent);
+    setDiffPreview(null);
+
+    if (demoMode) {
+      setDemoState((current) => {
+        const nextContents = { ...current.fileContents, [demoFileKey(activeProject.id, filePath)]: proposedContent };
+        return { ...current, fileContents: nextContents };
+      });
+      pushOutputLogs([`[AI Diff] Accepted diff changes applied to ${filePath}`]);
+      return;
+    }
+
+    try {
+      await api.saveFile(token, activeProject.id, { path: filePath, content: proposedContent });
+      pushOutputLogs([`[AI Diff] Accepted diff changes successfully saved to ${filePath}`]);
+    } catch (saveError) {
+      const msg = saveError instanceof Error ? saveError.message : "Failed to save file";
+      pushOutputLogs([`[AI Diff Error] ${msg}`]);
+    }
+  }, [diffPreview, activeProject, demoMode, token, pushOutputLogs]);
+
+  const handleRejectDiff = useCallback(() => {
+    if (!diffPreview) return;
+    pushOutputLogs([`[AI Diff] Discarded proposed changes for ${diffPreview.filePath}`]);
+    setDiffPreview(null);
+  }, [diffPreview, pushOutputLogs]);
 
   async function handleChatSend(content: string) {
     setChatMessages((current) => [...current, { id: `user-${Date.now()}`, role: "user", content }]);
@@ -1317,6 +1383,13 @@ export default function App() {
                   onSave={saveFile}
                   onRun={runActiveFile}
                   onLanguageChange={handleLanguageChange}
+                  diffMode={Boolean(diffPreview)}
+                  originalValue={diffPreview?.originalContent || editorValue}
+                  modifiedValue={diffPreview?.proposedContent || editorValue}
+                  diffStats={diffPreview?.stats}
+                  hunkCount={diffPreview?.hunkCount}
+                  onAcceptDiff={handleAcceptDiff}
+                  onRejectDiff={handleRejectDiff}
                 />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-3 bg-ide-editor">
@@ -1369,6 +1442,7 @@ export default function App() {
                 styleProfile={styleProfile}
                 onReindexStyle={handleReindexStyle}
                 isIndexingStyle={isIndexingStyle}
+                onPreviewDiff={handlePreviewDiff}
               />
               </div>
             </>

@@ -1,12 +1,14 @@
-import { Bot, Check, ChevronDown, ChevronRight, Copy, Dna, FilePlus2, RefreshCw, SendHorizonal, Sparkles, Wand2 } from "lucide-react";
+import { Bot, Check, ChevronDown, ChevronRight, Copy, Dna, FilePlus2, GitCompare, RefreshCw, SendHorizonal, Sparkles, Wand2 } from "lucide-react";
 import { useState } from "react";
 import type { AiAction, ChatMessage, CodeApplyAction, StyleProfile } from "../types";
+import { extractDiffHunks } from "../lib/diffParser";
 
 type ChatPanelProps = {
   messages: ChatMessage[];
   onSend: (content: string) => Promise<void> | void;
   onAction: (action: AiAction) => Promise<void> | void;
   onApplyCode: (action: CodeApplyAction, payload: { language: string; code: string }) => Promise<void> | void;
+  onPreviewDiff?: (aiReply: string) => void;
   isGenerating: boolean;
   activeLanguageLabel: string;
   activeFile: string | null;
@@ -28,6 +30,7 @@ export function ChatPanel({
   onSend,
   onAction,
   onApplyCode,
+  onPreviewDiff,
   isGenerating,
   activeLanguageLabel,
   activeFile,
@@ -140,7 +143,12 @@ export function ChatPanel({
                 : "bg-ide-chat-ai text-secondary-foreground"
             }`}
           >
-              <MessageContent content={message.content} canApply={message.role === "assistant"} onApplyCode={onApplyCode} />
+              <MessageContent
+                content={message.content}
+                canApply={message.role === "assistant"}
+                onApplyCode={onApplyCode}
+                onPreviewDiff={onPreviewDiff}
+              />
             </div>
             {message.role === "user" ? (
               <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary/20">
@@ -228,16 +236,40 @@ export function ChatPanel({
 function MessageContent({
   content,
   canApply,
-  onApplyCode
+  onApplyCode,
+  onPreviewDiff
 }: {
   content: string;
   canApply: boolean;
   onApplyCode: (action: CodeApplyAction, payload: { language: string; code: string }) => Promise<void> | void;
+  onPreviewDiff?: (aiReply: string) => void;
 }) {
+  const diffHunks = canApply ? extractDiffHunks(content) : [];
   const blocks = content.split(/```/);
 
   return (
     <div className="space-y-3">
+      {diffHunks.length > 0 && onPreviewDiff ? (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-950/30 p-2.5">
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+              <GitCompare className="h-3.5 w-3.5" />
+              <span>AI Diff Suggested ({diffHunks.length} hunk{diffHunks.length === 1 ? "" : "s"})</span>
+            </div>
+            <button
+              onClick={() => onPreviewDiff(content)}
+              className="flex items-center gap-1 rounded bg-amber-500/20 px-2.5 py-1 text-xs font-medium text-amber-300 transition hover:bg-amber-500/30 border border-amber-500/30 shadow-sm"
+            >
+              <GitCompare className="h-3 w-3" />
+              Review Diff
+            </button>
+          </div>
+          <p className="text-[11px] text-zinc-400">
+            Contains structured Search/Replace changes. Click 'Review Diff' to preview and accept/reject in the Monaco editor.
+          </p>
+        </div>
+      ) : null}
+
       {blocks.map((block, index) => {
         if (index % 2 === 0) {
           const trimmed = block.trim();

@@ -1,8 +1,9 @@
-import MonacoEditor, { type Monaco } from "@monaco-editor/react";
+import MonacoEditor, { DiffEditor, type Monaco } from "@monaco-editor/react";
 import { Play, Save } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import { getLanguageMeta } from "../lib";
 import type { EditorCursorContext, LanguageOption } from "../types";
+import { DiffReviewBar } from "./DiffReviewBar";
 
 type EditorProps = {
   filePath: string;
@@ -13,12 +14,21 @@ type EditorProps = {
   onSave: () => Promise<void> | void;
   onRun: () => Promise<void> | void;
   onLanguageChange: (language: LanguageOption) => Promise<void> | void;
+  // Stage 3 Diff Editor props
+  diffMode?: boolean;
+  originalValue?: string;
+  modifiedValue?: string;
+  diffStats?: { added: number; removed: number };
+  hunkCount?: number;
+  onAcceptDiff?: () => void;
+  onRejectDiff?: () => void;
 };
 
 const languageOptions: LanguageOption[] = ["javascript", "python", "cpp", "java"];
 
 export function Editor(props: EditorProps) {
   const editorRef = useRef<any>(null);
+  const [sideBySide, setSideBySide] = useState(true);
 
   function handleBeforeMount(monaco: Monaco) {
     monaco.editor.defineTheme("ninjaclaw-dark", {
@@ -34,7 +44,11 @@ export function Editor(props: EditorProps) {
         "editor.background": "#0b0d12",
         "editor.lineHighlightBackground": "#11161f",
         "editorLineNumber.foreground": "#4b5563",
-        "editorLineNumber.activeForeground": "#d4d4d8"
+        "editorLineNumber.activeForeground": "#d4d4d8",
+        "diffEditor.insertedTextBackground": "#10b98125",
+        "diffEditor.removedTextBackground": "#f43f5e25",
+        "diffEditor.insertedLineBackground": "#10b98115",
+        "diffEditor.removedLineBackground": "#f43f5e15"
       }
     });
 
@@ -88,59 +102,99 @@ export function Editor(props: EditorProps) {
 
   return (
     <section className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-ide-editor">
-      <div className="flex items-center justify-between border-b border-ide-border bg-ide-panel px-4 py-2.5">
-        <div className="flex items-center gap-3">
-          <div className="rounded-md bg-secondary px-3 py-1 text-sm text-foreground">{props.filePath || "untitled"}</div>
-          <select
-            value={props.language}
-            onChange={(event) => props.onLanguageChange(event.target.value as LanguageOption)}
-            className="rounded-md border border-ide-border bg-ide-sidebar px-3 py-1.5 text-sm text-foreground outline-none"
-          >
-            {languageOptions.map((option) => (
-              <option key={option} value={option}>
-                {getLanguageMeta(option).label}
-              </option>
-            ))}
-          </select>
+      {props.diffMode ? (
+        <DiffReviewBar
+          filePath={props.filePath}
+          stats={props.diffStats || { added: 0, removed: 0 }}
+          hunkCount={props.hunkCount || 1}
+          sideBySide={sideBySide}
+          onToggleSideBySide={() => setSideBySide((prev) => !prev)}
+          onAccept={() => props.onAcceptDiff?.()}
+          onReject={() => props.onRejectDiff?.()}
+        />
+      ) : (
+        <div className="flex items-center justify-between border-b border-ide-border bg-ide-panel px-4 py-2.5">
+          <div className="flex items-center gap-3">
+            <div className="rounded-md bg-secondary px-3 py-1 text-sm text-foreground">{props.filePath || "untitled"}</div>
+            <select
+              value={props.language}
+              onChange={(event) => props.onLanguageChange(event.target.value as LanguageOption)}
+              className="rounded-md border border-ide-border bg-ide-sidebar px-3 py-1.5 text-sm text-foreground outline-none"
+            >
+              {languageOptions.map((option) => (
+                <option key={option} value={option}>
+                  {getLanguageMeta(option).label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-1.5 text-sm text-white transition hover:bg-emerald-500"
+              onClick={props.onRun}
+            >
+              <Play size={14} />
+              Run
+            </button>
+            <button className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground transition hover:bg-primary/90" onClick={props.onSave}>
+              <Save size={14} />
+              Save
+            </button>
+          </div>
         </div>
-        <button
-          className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-1.5 text-sm text-white transition hover:bg-emerald-500"
-          onClick={props.onRun}
-        >
-          <Play size={14} />
-          Run
-        </button>
-        <button className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground transition hover:bg-primary/90" onClick={props.onSave}>
-          <Save size={14} />
-          Save
-        </button>
-      </div>
+      )}
 
       <div className="h-full min-h-0 flex-1">
-        <MonacoEditor
-          beforeMount={handleBeforeMount}
-          onMount={handleMount}
-          height="100%"
-          theme="ninjaclaw-dark"
-          language={props.language === "cpp" ? "cpp" : props.language}
-          value={props.value}
-          onChange={(value) => props.onChange(value ?? "")}
-          options={{
-            minimap: { enabled: false },
-            lineNumbers: "on",
-            quickSuggestions: true,
-            suggestOnTriggerCharacters: true,
-            automaticLayout: true,
-            fontSize: 14,
-            fontLigatures: true,
-            wordWrap: "on",
-            fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-            renderLineHighlight: "line",
-            smoothScrolling: true,
-            bracketPairColorization: { enabled: true },
-            padding: { top: 18 }
-          }}
-        />
+        {props.diffMode ? (
+          <DiffEditor
+            beforeMount={handleBeforeMount}
+            height="100%"
+            theme="ninjaclaw-dark"
+            language={props.language === "cpp" ? "cpp" : props.language}
+            original={props.originalValue || ""}
+            modified={props.modifiedValue || ""}
+            options={{
+              renderSideBySide: sideBySide,
+              readOnly: true,
+              minimap: { enabled: false },
+              lineNumbers: "on",
+              automaticLayout: true,
+              fontSize: 14,
+              fontLigatures: true,
+              wordWrap: "on",
+              fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+              renderLineHighlight: "line",
+              smoothScrolling: true,
+              bracketPairColorization: { enabled: true },
+              padding: { top: 18 }
+            }}
+          />
+        ) : (
+          <MonacoEditor
+            beforeMount={handleBeforeMount}
+            onMount={handleMount}
+            height="100%"
+            theme="ninjaclaw-dark"
+            language={props.language === "cpp" ? "cpp" : props.language}
+            value={props.value}
+            onChange={(value) => props.onChange(value ?? "")}
+            options={{
+              minimap: { enabled: false },
+              lineNumbers: "on",
+              quickSuggestions: true,
+              suggestOnTriggerCharacters: true,
+              automaticLayout: true,
+              fontSize: 14,
+              fontLigatures: true,
+              wordWrap: "on",
+              fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+              renderLineHighlight: "line",
+              smoothScrolling: true,
+              bracketPairColorization: { enabled: true },
+              padding: { top: 18 }
+            }}
+          />
+        )}
       </div>
     </section>
   );
