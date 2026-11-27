@@ -5,6 +5,7 @@ import { astWorkerPool } from "./astWorkerPool.js";
 import { sniffConfigFiles } from "./configSniffer.js";
 import { sampleStratifiedFiles } from "./fileSampler.js";
 import { extractStyleProfile } from "./styleExtractor.js";
+import { dependencyGraph } from "./dependencyGraph.js";
 
 function sha256(content = "") {
   return crypto.createHash("sha256").update(content).digest("hex");
@@ -137,6 +138,9 @@ export class StyleService {
       // Collect all AST parsed files for this project
       const allParsedFiles = Array.from(projectCache.values());
       const allNodes = allParsedFiles.flatMap((f) => f.nodes || []);
+
+      // Synchronize Live Dependency Graph
+      dependencyGraph.updateProjectFiles(allParsedFiles);
 
       // 3. Tier 1: Deterministic Config Sniffing (Zero LLM Tokens)
       const configFacts = sniffConfigFiles(files);

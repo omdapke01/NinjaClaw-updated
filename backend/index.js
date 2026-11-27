@@ -14,6 +14,8 @@ import { Server } from "socket.io";
 import { MongoClient } from "mongodb";
 import { v4 as uuid } from "uuid";
 import { StyleService } from "./intelligence/styleService.js";
+import { contextOrchestrator } from "./intelligence/contextOrchestrator.js";
+import { scrubSecrets } from "./intelligence/secretScrubber.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -624,15 +626,21 @@ async function callGemini(prompt, generationConfig = {}) {
     return { ok: false, status: 500, message: "GEMINI_API_KEY is not configured on the backend" };
   }
 
+  const { cachedContent, ...cleanGenConfig } = generationConfig;
+  const requestBody = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.4, topP: 0.9, maxOutputTokens: 4096, ...cleanGenConfig }
+  };
+  if (cachedContent) {
+    requestBody.cachedContent = cachedContent;
+  }
+
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.4, topP: 0.9, maxOutputTokens: 4096, ...generationConfig }
-      })
+      body: JSON.stringify(requestBody)
     }
   );
 
@@ -645,70 +653,41 @@ async function callGemini(prompt, generationConfig = {}) {
   return { ok: true, text };
 }
 async function generateGeminiReply({ message, project, activeFilePath, activeFileContent, files, language, intent }) {
-  const activeLanguage = language || inferRuntime(activeFilePath || "");
-  const fileList = files?.slice(0, 50).map((file) => `- ${file.path}`).join("\n") || "(no files)";
-  const intentLine = intent ? `Primary task: ${intent}` : "Primary task: general assistance";
-  const lowerMessage = String(message || "").toLowerCase();
-  const isCompetitivePrompt =
-    /(leetcode|gfg|geeksforgeeks|codeforces|hackerrank|practice problem|dsa|replace o's with x's|surrounded regions)/.test(lowerMessage);
-
-  let styleSection = "";
+  let styleProfile = null;
   if (styleService && project?.id) {
     try {
-      const profile = await styleService.getStyleProfile(project.id, project.ownerId);
-      if (profile && profile.status === "ready") {
-        const conv = profile.effectiveConventions || profile.conventions || {};
-        const exemplarBlocks = (profile.exemplars || []).map(
-          (e) => `[Exemplar ${e.category} - ${e.symbolPath} (${e.filePath})]:\n${e.code}\n`
-        ).join("\n");
-
-        styleSection = [
-          "",
-          "=== CODEBASE STYLE DNA (Match these exact project conventions) ===",
-          `- Architecture: ${conv.oopAndPatterns?.architecturalStyle || "layered"} (${conv.oopAndPatterns?.primaryParadigm || "standard"}, DI: ${conv.oopAndPatterns?.dependencyInjection || "none"})`,
-          `- Error Handling: ${conv.errorHandling?.strategy || "standard"} (Classes: ${(conv.errorHandling?.customErrorClasses || []).join(", ") || "none"})`,
-          `- Guards & Edge Cases: ${conv.edgeCasesAndGuards?.guardClauseStyle || "early_return"} (Validation: ${conv.edgeCasesAndGuards?.validationApproach || "manual"})`,
-          `- Naming: variables/functions: ${conv.namingAndTypes?.variableCasing || "camelCase"}, classes: ${conv.namingAndTypes?.classCasing || "PascalCase"}, strictness: ${conv.namingAndTypes?.typeStrictness || "standard"}`,
-          exemplarBlocks ? `\n=== GOLDEN CODE EXEMPLARS (Reference implementations from this codebase) ===\n${exemplarBlocks}` : ""
-        ].filter(Boolean).join("\n");
-      }
+      styleProfile = await styleService.getStyleProfile(project.id, project.ownerId);
     } catch {
       // Non-fatal if style profile fetch fails
     }
   }
 
-  const prompt = [
-    "You are NinjaClaw AI, a strong coding assistant inside a browser IDE.",
-    "Respond in a practical, product-quality way.",
-    `The user's active language is ${runtimeLabel(activeLanguage)}. Prefer that language unless the user explicitly asks for another one.`,
-    "If the user asks for code, provide complete, runnable, self-contained code instead of a fragment.",
-    "If the request is about the current file, talk about that file directly.",
-    "Use fenced code blocks with the correct language tag whenever you return code.",
-    "For debugging requests, explain the issue briefly and then show the corrected code.",
-    isCompetitivePrompt
-      ? "For coding practice or interview-style problems, return the final minimal solution only, with no long explanation and almost no comments."
-      : "Keep comments light unless the user explicitly asks for explanation.",
-    isCompetitivePrompt
-      ? "Prefer the platform-ready class/function signature over a standalone demo main function unless the user explicitly asks for a full runnable program."
-      : "When the user asks for a full file, provide a full file.",
-    "",
-    intentLine,
-    `Project: ${project?.name || "Unknown project"}`,
-    `Active file: ${activeFilePath || "None"}`,
-    `Active language: ${runtimeLabel(activeLanguage)}`,
-    styleSection,
-    "",
-    "Project files:",
-    fileList,
-    "",
-    "Active file content:",
-    activeFileContent || "(empty)",
-    "",
-    "User request:",
-    message
-  ].join("\n");
+  const { fullPrompt, staticPrefix } = contextOrchestrator.buildOrchestratedPrompt({
+    message,
+    project,
+    activeFilePath,
+    activeFileContent,
+    language,
+    intent,
+    styleProfile
+  });
 
-  return callGemini(prompt, { temperature: 0.25, topP: 0.85, maxOutputTokens: 4096 });
+  const generationConfig = { temperature: 0.25, topP: 0.85, maxOutputTokens: 4096 };
+
+  // Context Caching lookup
+  if (project?.id) {
+    const cachedOptions = await contextOrchestrator.getContextCachedOptions({
+      projectId: project.id,
+      staticPrefix,
+      model: GEMINI_MODEL,
+      apiKey: GEMINI_API_KEY
+    });
+    if (cachedOptions?.cachedContent) {
+      generationConfig.cachedContent = cachedOptions.cachedContent;
+    }
+  }
+
+  return callGemini(fullPrompt, generationConfig);
 }
 
 function cleanSuggestionText(text = "") {
@@ -718,6 +697,9 @@ function cleanSuggestionText(text = "") {
 async function generateGeminiSuggestion({ project, activeFilePath, activeFileContent, files, language, prefix, suffix, lineNumber, column }) {
   const activeLanguage = language || inferRuntime(activeFilePath || "");
   const fileList = files?.slice(0, 30).map((file) => `- ${file.path}`).join("\n") || "(no files)";
+  const cleanPrefix = scrubSecrets(prefix || "", activeFilePath || "");
+  const cleanSuffix = scrubSecrets(suffix || "", activeFilePath || "");
+
   const prompt = [
     "You are NinjaClaw AI inline completion mode.",
     `The completion must continue the user's code in ${runtimeLabel(activeLanguage)}.`,
@@ -733,14 +715,16 @@ async function generateGeminiSuggestion({ project, activeFilePath, activeFileCon
     "Project files:",
     fileList,
     "",
-    "Current file:",
-    activeFileContent || "(empty)",
+    "Current file context:",
+    `<codebase_context path="${activeFilePath || "snippet"}" untrusted="true">`,
+    scrubSecrets(activeFileContent || "", activeFilePath || ""),
+    "</codebase_context>",
     "",
     "Code before cursor:",
-    prefix || "",
+    cleanPrefix,
     "",
     "Code after cursor:",
-    suffix || ""
+    cleanSuffix
   ].join("\n");
 
   const result = await callGemini(prompt, { temperature: 0.2, topP: 0.8, maxOutputTokens: 220 });
